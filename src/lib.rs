@@ -30,6 +30,12 @@ pub struct KeyedSemaphore {
     keys: Mutex<HashSet<Arc<str>>>,
 }
 
+impl Default for KeyedSemaphore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyedSemaphore {
     pub fn new() -> Self {
         Self {
@@ -54,6 +60,11 @@ impl KeyedSemaphore {
     /// The number of active keys, yet to be dropped.
     pub fn len(&self) -> usize {
         self.keys.lock().len()
+    }
+
+    /// Whether there are no active keys.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
