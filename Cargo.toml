@@ -1,12 +1,12 @@
 [package]
-name = "keyed-semaphore"
+name = "inflight-set"
 version = "0.1.0"
 edition = "2024"
-description = "Acquire many distinct RAII permits keyed by name, allowing only one in-flight permit per key."
+description = "Acquire many distinct RAII guards keyed by name, allowing only one in-flight guard per key."
 license = "MIT"
-repository = "https://github.com/jdockerty/keyed-semaphore"
+repository = "https://github.com/jdockerty/inflight-set"
 readme = "README.md"
-keywords = ["semaphore", "concurrency", "mutex", "permit", "keyed"]
+keywords = ["concurrency", "mutex", "guard", "keyed", "inflight"]
 categories = ["concurrency"]
 
 [dependencies]
