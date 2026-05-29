@@ -103,12 +103,16 @@ mod test {
     #[test]
     fn key_drop_semantics() {
         let s = InflightSet::new();
-        assert_eq!(s.len(), 0);
+        assert_eq!(s.len(), 0, "No keys registered on creation");
 
         let guard = s.acquire("my_job_id").unwrap();
         assert_eq!(s.len(), 1);
         drop(guard);
-        assert_eq!(s.len(), 0);
+        assert_eq!(
+            s.len(),
+            0,
+            "After drop, the key should be removed from the set"
+        );
     }
 
     #[test]
