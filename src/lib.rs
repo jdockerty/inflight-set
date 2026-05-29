@@ -168,20 +168,22 @@ mod test {
     #[test]
     fn acquire_same_key_many_threads() {
         let s = Arc::new(InflightSet::new());
+        let _guard = s.acquire("my-key").expect("unique key succeeds");
+
         let mut work = Vec::new();
-        for _ in 0..10_000 {
-            work.push(std::thread::spawn({
-                let s_captured = Arc::clone(&s);
-                move || {
-                    s_captured
-                        .acquire(&format!("my-key"))
-                        .expect("concurrent access should never cause a panic under Mutex usage");
-                }
+        for _ in 0..1_000 {
+            let s = Arc::clone(&s);
+            work.push(std::thread::spawn(move || {
+                s.acquire("my-key")
+                    .expect_err("thread trying to acquire duplicate key should error")
             }));
         }
 
         for w in work {
-            w.join().unwrap();
+            assert!(matches!(
+                w.join().unwrap(),
+                InflightSetError::DuplicateKey(_)
+            ));
         }
     }
 
