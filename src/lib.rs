@@ -20,8 +20,15 @@
 //!// When guards go out of scope, the key is released freeing it for later use.
 //!```
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -110,6 +117,126 @@ impl InflightSet {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum CountedSetError {
+    #[error("{key} has already permitted the maximum number of guards {max}")]
+    MaximumGuardsPermitted { key: String, max: u64 },
+
+    #[error("{0} has already been initialised")]
+    AlreadyInitialised(String),
+
+    #[error("attempting to acquire a key which has not been initialised {0}")]
+    KeyNotInitialised(String),
+}
+
+/// A [`CountedInflightSet`] can pass out an [`CountedSetGuard`] to
+/// the same key, up to a maximum count.
+#[derive(Debug)]
+pub struct CountedInflightSet {
+    counted_keys: Arc<DashMap<Arc<str>, MaxWithCurrent>>,
+}
+
+#[derive(Debug, Clone)]
+struct MaxWithCurrent {
+    key: Arc<str>,
+    max: u64,
+    current: Arc<AtomicU64>,
+}
+
+impl MaxWithCurrent {
+    fn new(key: Arc<str>, max: u64, current: u64) -> Self {
+        Self {
+            key,
+            max,
+            current: Arc::new(AtomicU64::new(current)),
+        }
+    }
+
+    /// Load the number of active guards for the given key.
+    #[allow(dead_code)]
+    fn current(&self) -> u64 {
+        self.current.load(Ordering::SeqCst)
+    }
+
+    pub fn inc(&self) -> Result<(), CountedSetError> {
+        if self.current.fetch_add(1, Ordering::SeqCst) >= self.max {
+            self.dec(); // Remove the add on error
+            return Err(CountedSetError::MaximumGuardsPermitted {
+                key: self.key.to_string(),
+                max: self.max,
+            });
+        }
+        Ok(())
+    }
+
+    /// Decrement the current value, returning the new value.
+    fn dec(&self) -> u64 {
+        self.current.fetch_sub(1, Ordering::SeqCst) - 1
+    }
+}
+
+#[derive(Debug)]
+pub struct CountedSetGuard<'a> {
+    inner: &'a CountedInflightSet,
+    max_with_current: MaxWithCurrent,
+}
+
+impl Drop for CountedSetGuard<'_> {
+    fn drop(&mut self) {
+        if self.max_with_current.dec() == 0 {
+            // There are no references for this key anymore, so it is
+            // safe to remove at this point.
+            self.inner.counted_keys.remove(&self.max_with_current.key);
+        }
+    }
+}
+
+impl Default for CountedInflightSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CountedInflightSet {
+    pub fn new() -> Self {
+        Self {
+            counted_keys: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Initialise a key to be used within the [`CountedInflightSet`].
+    ///
+    /// A key must be initialise before it can be used, in order to know the maximum
+    /// number of guards that be acquired at any time.
+    pub fn initialise_key(&self, key: &str, max: u64) -> Result<(), CountedSetError> {
+        let key: Arc<str> = key.into();
+        if self.counted_keys.contains_key(&key) {
+            return Err(CountedSetError::AlreadyInitialised(key.to_string()));
+        }
+
+        self.counted_keys
+            .insert(Arc::clone(&key), MaxWithCurrent::new(key, max, 0));
+        Ok(())
+    }
+
+    /// Acquire a [`CountedSetGuard`] for a pre-initialised key, see ([`CountedInflightSet::initialise_key`])
+    /// for further details.
+    ///
+    /// If the maximum number of guards has been reached, an error will be returned.
+    pub fn acquire(&self, key: &str) -> Result<CountedSetGuard<'_>, CountedSetError> {
+        match self.counted_keys.get(key) {
+            Some(k) => {
+                k.inc()?;
+                Ok(CountedSetGuard {
+                    inner: self,
+                    max_with_current: k.value().clone(),
+                })
+            }
+            None => Err(CountedSetError::KeyNotInitialised(key.to_string())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::{
@@ -120,7 +247,7 @@ mod test {
         time::{Duration, Instant},
     };
 
-    use crate::{InflightSet, InflightSetError};
+    use crate::{CountedInflightSet, InflightSet, InflightSetError};
 
     #[test]
     fn key_drop_semantics() {
@@ -228,5 +355,49 @@ mod test {
         }
         handle.join().unwrap();
         assert!(called_acquire_or_wait.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn counted_set_keys_must_be_initialised() {
+        let c = CountedInflightSet::new();
+        let err = c.acquire("my_key").unwrap_err();
+        assert!(matches!(err, crate::CountedSetError::KeyNotInitialised(_)));
+    }
+
+    #[test]
+    fn counted_set_acquire() {
+        let c = CountedInflightSet::new();
+        let key = "test-key";
+        let max_guards = 2;
+
+        c.initialise_key(key, max_guards)
+            .expect("unique key for test");
+
+        // Acquire the same key twice, up to `max_guards`
+        let guard_one = c.acquire(key).unwrap();
+        let guard_two = c.acquire(key).unwrap();
+
+        let err = c.acquire(key).unwrap_err();
+        assert!(
+            matches!(err, crate::CountedSetError::MaximumGuardsPermitted { .. }),
+            "Attempting to acquire a key past {max_guards} guards should error"
+        );
+
+        assert_eq!(guard_one.max_with_current.key.as_ref(), key);
+        assert_eq!(guard_one.max_with_current.max, max_guards);
+        assert_eq!(guard_one.max_with_current.current(), max_guards);
+        drop(guard_two);
+
+        assert_eq!(
+            guard_one.max_with_current.max, max_guards,
+            "Max value should never change"
+        );
+        assert_eq!(guard_one.max_with_current.current(), max_guards - 1);
+
+        drop(guard_one);
+        assert!(
+            c.counted_keys.is_empty(),
+            "After both keys are dropped, the set should now be empty"
+        );
     }
 }
