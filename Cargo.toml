@@ -10,5 +10,6 @@ keywords = ["concurrency", "mutex", "guard", "keyed", "inflight"]
 categories = ["concurrency"]
 
 [dependencies]
+dashmap = "6.2.1"
 parking_lot = "0.12.5"
 thiserror = "2.0.18"
